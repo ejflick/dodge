@@ -1,8 +1,7 @@
-#include <string>
+#include <cstring>
+#include <vector>
 #include <iostream>
 #include <raylib.h>
-#include <rlgl.h>
-#include <vector>
 
 constexpr float OBSTACLE_SPEED = 400.0 / 60.0;
 
@@ -11,6 +10,17 @@ constexpr int SCREEN_HEIGHT = 400;
 
 constexpr float FLOOR_HEIGHT = 35;
 constexpr float FLOOR_Y = SCREEN_HEIGHT - FLOOR_HEIGHT;
+
+static int Lives = 3;
+static int Score = 0;
+
+typedef enum
+{
+  PLAYING,
+  GAME_OVER
+} GameState;
+
+GameState GAME_STATE = PLAYING;
 
 class Timer
 {
@@ -31,11 +41,12 @@ public:
       return;
     }
 
-    time -= GetFrameTime();
+    remaining -= GetFrameTime();
 
-    if (time <= 0)
+    if (remaining <= 0)
     {
       done = true;
+      running = false;
     }
   }
 
@@ -61,6 +72,34 @@ public:
   }
 };
 
+class Obstacle
+{
+public:
+  Vector2 pos;
+  Vector2 size;
+
+  Obstacle(Vector2 _size) : size(_size), pos({0, 0})
+  {
+    pos.x = SCREEN_WIDTH;
+    pos.y = FLOOR_Y - size.y;
+  }
+
+  void Update()
+  {
+    pos.x -= OBSTACLE_SPEED;
+  }
+
+  void Draw()
+  {
+    DrawRectangleV(pos, size, DARKGREEN);
+  }
+
+  bool OffScreen() const
+  {
+    return pos.x < 0 - size.x;
+  }
+};
+
 class Player
 {
 private:
@@ -71,6 +110,8 @@ private:
   float rotation = 0;
   bool rotating = false;
   bool canJump = false;
+  Timer invincibilityTimer = Timer(2.5);
+  bool invincible;
 
 public:
   void Update()
@@ -95,41 +136,43 @@ public:
       vel.y = 0;
       canJump = true;
     }
+
+    if (invincible)
+    {
+      invincibilityTimer.update();
+
+      if (invincibilityTimer.done)
+        invincible = false;
+    }
   }
 
-  void Draw()
+  void Draw() const
   {
-    DrawRectangleV(pos, size, RED);
-  }
-};
-
-class Obstacle
-{
-private:
-  Vector2 pos;
-  Vector2 size;
-
-public:
-  Obstacle(Vector2 _size) : size(_size), pos({0, 0})
-  {
-    pos.x = SCREEN_WIDTH;
-    pos.y = FLOOR_Y - size.y;
+    DrawRectangleV(pos, size, invincible ? GREEN : RED);
   }
 
-  bool Update()
+  bool CheckCollision(Obstacle &obstacle) const
   {
-    pos.x -= OBSTACLE_SPEED;
+    // AABB collision
+    return pos.x < obstacle.pos.x + obstacle.size.x && pos.x + size.x > obstacle.pos.x && pos.y < obstacle.pos.y + obstacle.size.y && pos.y + size.y > obstacle.pos.y;
   }
 
-  void Draw()
+  void CollidedWithObstacle()
   {
-    DrawRectangleV(pos, size, DARKGREEN);
+    if (!invincible)
+    {
+      invincibilityTimer.reset();
+      invincibilityTimer.start();
+      invincible = true;
+      Lives--;
+    }
   }
 };
 
 class World
 {
 private:
+  char scoreStringBuffer[64];
   Player player;
   std::vector<Obstacle> obstacles;
   Timer createObstacleTimer;
@@ -142,6 +185,17 @@ private:
         DARKGRAY);
   }
 
+  void CheckPlayerCollisionWithObstacles()
+  {
+    for (int i = 0; i < obstacles.size(); i++)
+    {
+      if (player.CheckCollision(obstacles[i]))
+      {
+        player.CollidedWithObstacle();
+      }
+    }
+  }
+
 public:
   World() : player(), obstacles(), createObstacleTimer(4)
   {
@@ -149,6 +203,11 @@ public:
 
   void Init()
   {
+    Score = 0;
+    Lives = 3;
+    player = Player();
+    obstacles.clear();
+    createObstacleTimer.reset();
     createObstacleTimer.start();
   }
 
@@ -156,9 +215,25 @@ public:
   {
     player.Update();
 
-    for (auto &&obstacle : obstacles)
+    // Update obstacles
+    for (auto &&ob : obstacles)
     {
-      obstacle.Update();
+      ob.Update();
+    }
+
+    // Remove off screen obstacles
+    auto iter = obstacles.begin();
+    while (iter != obstacles.end())
+    {
+      if (iter->OffScreen())
+      {
+        iter = obstacles.erase(iter);
+        Score += 1;
+      }
+      else
+      {
+        iter++;
+      }
     }
 
     createObstacleTimer.update();
@@ -168,12 +243,18 @@ public:
       // Add new obstacle
       auto o = Obstacle({20, 40});
       obstacles.push_back(o);
-      std::cout << "Created obstacle" << std::endl;
 
       // Reset timer
-      createObstacleTimer.setTime(GetRandomValue(0.5, 2.5));
+      createObstacleTimer.setTime(GetRandomValue(1, 2) - 0.5);
       createObstacleTimer.reset();
       createObstacleTimer.start();
+    }
+
+    CheckPlayerCollisionWithObstacles();
+
+    if (Lives == 0)
+    {
+      GAME_STATE = GAME_OVER;
     }
   }
 
@@ -186,6 +267,12 @@ public:
     {
       obstacle.Draw();
     }
+
+    sprintf(scoreStringBuffer, "Score: %d", Score);
+    DrawText(scoreStringBuffer, 10, 10, 40, BLACK);
+
+    sprintf(scoreStringBuffer, "Lives: %d", Lives);
+    DrawText(scoreStringBuffer, 10, 50, 30, BLACK);
   }
 };
 
@@ -195,7 +282,6 @@ public:
   bool running = true;
   Camera2D camera;
   World world;
-  int score = 0;
 
   Game() : running(false), camera(), world() {}
 
@@ -218,13 +304,32 @@ public:
 
       ClearBackground(LIGHTGRAY);
 
-      world.Draw();
-
-      DrawText("Score: 0", 10, 10, 40, BLACK);
+      switch (GAME_STATE)
+      {
+      case PLAYING:
+        world.Draw();
+        break;
+      case GAME_OVER:
+        int textSize = MeasureText("GAME OVER!", 50);
+        DrawText("GAME OVER!", (SCREEN_WIDTH / 2) - (textSize / 2), (SCREEN_HEIGHT / 2) - 25, 50, MAROON);
+        break;
+      }
 
       EndDrawing();
 
-      world.Update();
+      switch (GAME_STATE)
+      {
+      case PLAYING:
+        world.Update();
+        break;
+      case GAME_OVER:
+        if (IsKeyPressed(KEY_SPACE))
+        {
+          world.Init();
+          GAME_STATE = PLAYING;
+        }
+        break;
+      }
     }
 
     running = false;
